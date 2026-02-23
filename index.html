@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Moving Car v2 🚗</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap');
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #0a0a0f;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: 'Share Tech Mono', monospace;
+      overflow: hidden;
+    }
+
+    h1 {
+      font-family: 'Orbitron', sans-serif;
+      color: #00ffcc;
+      font-size: 1.4rem;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+      text-shadow: 0 0 20px #00ffcc88;
+    }
+
+    .version-badge {
+      font-size: 0.7rem;
+      color: #ff6b35;
+      letter-spacing: 3px;
+      margin-bottom: 14px;
+      text-shadow: 0 0 10px #ff6b3588;
+    }
+
+    canvas {
+      border: 1px solid #00ffcc33;
+      border-radius: 4px;
+      box-shadow: 0 0 40px #00ffcc22, 0 0 80px #00ffcc11;
+      display: block;
+    }
+
+    .controls {
+      margin-top: 14px;
+      display: flex;
+      gap: 20px;
+      color: #ffffff55;
+      font-size: 0.72rem;
+      letter-spacing: 1px;
+    }
+
+    .controls span { color: #00ffcc99; }
+
+    .score-bar {
+      display: flex;
+      gap: 30px;
+      margin-bottom: 10px;
+      font-size: 0.78rem;
+      color: #ffffff66;
+      letter-spacing: 2px;
+    }
+    .score-bar b { color: #ffe066; font-family: 'Orbitron', sans-serif; }
+  </style>
+</head>
+<body>
+  <h1>Moving Car</h1>
+  <div class="version-badge">▸ VERSION 2 — MODERN C++ → WEB EDITION</div>
+  <div class="score-bar">
+    <span>SCORE: <b id="score">0</b></span>
+    <span>CARS: <b id="carCount">1</b></span>
+    <span>SPEED: <b id="speedDisplay">1x</b></span>
+  </div>
+  <canvas id="canvas"></canvas>
+  <div class="controls">
+    <span>◀ ▶ MOVE</span>
+    <span>▲ ▼ SPEED</span>
+    <span>SPACE ADD CAR</span>
+    <span>M MUTE</span>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 800;
+    canvas.height = 500;
+
+    // ─── Audio Engine ────────────────────────────────────────────────────────
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    let audioCtx = null;
+    let muted = false;
+    let engineNode = null, gainNode = null, rainGain = null;
+
+    function initAudio() {
+      if (audioCtx) return;
+      audioCtx = new AudioCtx();
+      gainNode = audioCtx.createGain();
+      gainNode.gain.value = 0.18;
+      gainNode.connect(audioCtx.destination);
+
+      // Engine hum
+      engineNode = audioCtx.createOscillator();
+      engineNode.type = 'sawtooth';
+      engineNode.frequency.value = 80;
+      engineNode.connect(gainNode);
+      engineNode.start();
+
+      // Rain white noise
+      const bufferSize = audioCtx.sampleRate * 2;
+      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+      const rainSource = audioCtx.createBufferSource();
+      rainSource.buffer = buffer;
+      rainSource.loop = true;
+      rainGain = audioCtx.createGain();
+      rainGain.gain.value = 0.06;
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = 1200;
+      rainSource.connect(filter);
+      filter.connect(rainGain);
+      rainGain.connect(audioCtx.destination);
+      rainSource.start();
+    }
+
+    function toggleMute() {
+      if (!audioCtx) return;
+      muted = !muted;
+      gainNode.gain.value = muted ? 0 : 0.18;
+      rainGain.gain.value = muted ? 0 : 0.06;
+    }
+
+    // ─── Rain ────────────────────────────────────────────────────────────────
+    const rainDrops = [];
+    for (let i = 0; i < 180; i++) {
+      rainDrops.push({
+        x: Math.random() * canvas.width,
+        y: Math.random() * (canvas.height - 80),
+        len: 8 + Math.random() * 10,
+        speed: 4 + Math.random() * 5,
+        opacity: 0.3 + Math.random() * 0.5
+      });
+    }
+
+    function updateRain() {
+      for (const d of rainDrops) {
+        d.y += d.speed;
+        d.x -= 0.5;
+        if (d.y > canvas.height - 80 || d.x < 0) {
+          d.x = Math.random() * canvas.width;
+          d.y = Math.random() * -50;
+        }
+      }
+    }
+
+    function drawRain() {
+      for (const d of rainDrops) {
+        ctx.save();
+        ctx.strokeStyle = `rgba(173, 216, 255, ${d.opacity})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(d.x, d.y);
+        ctx.lineTo(d.x - 2, d.y + d.len);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // ─── Road ────────────────────────────────────────────────────────────────
+    let roadOffset = 0;
+    function drawRoad() {
+      // Road base
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(0, canvas.height - 80, canvas.width, 80);
+
+      // Road edge lines
+      ctx.strokeStyle = '#ffffff22';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, canvas.height - 80);
+      ctx.lineTo(canvas.width, canvas.height - 80);
+      ctx.stroke();
+
+      // Dashed center line (animated)
+      ctx.setLineDash([40, 30]);
+      ctx.lineDashOffset = -roadOffset;
+      ctx.strokeStyle = '#ffe06688';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, canvas.height - 40);
+      ctx.lineTo(canvas.width, canvas.height - 40);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // ─── Cars ────────────────────────────────────────────────────────────────
+    const CAR_COLORS = [
+      '#ff4444','#44ff88','#4488ff','#ffdd44',
+      '#ff44dd','#44ffff','#ff8844','#88ff44',
+      '#ff44aa','#00ffcc','#ff6b35','#a855f7'
+    ];
+
+    class Car {
+      constructor(x, lane, colorIdx) {
+        this.x = x;
+        this.lane = lane; // 0 = top lane, 1 = bottom lane
+        this.y = canvas.height - 80 + (lane === 0 ? 18 : 54);
+        this.color = CAR_COLORS[colorIdx % CAR_COLORS.length];
+        this.width = 70;
+        this.height = 30;
+        this.speed = 0;
+        this.maxSpeed = 5;
+        this.colorTimer = 0;
+        this.wheelAngle = 0;
+        this.isPlayer = false;
+        // NPC cars move on their own
+        this.npcSpeed = (Math.random() * 2 + 1) * (Math.random() < 0.5 ? 1 : -1);
+      }
+
+      update(isPlayer, keys, gameSpeed) {
+        if (isPlayer) {
+          if (keys['ArrowRight']) this.speed = Math.min(this.speed + 0.4, this.maxSpeed);
+          else if (keys['ArrowLeft']) this.speed = Math.max(this.speed - 0.4, -this.maxSpeed);
+          else this.speed *= 0.9;
+          this.x += this.speed;
+        } else {
+          this.x += this.npcSpeed * gameSpeed;
+          if (this.x > canvas.width + 60) this.x = -60;
+          if (this.x < -60) this.x = canvas.width + 60;
+        }
+
+        // Clamp player
+        if (isPlayer) {
+          if (this.x < 35) { this.x = 35; this.speed = 0; }
+          if (this.x > canvas.width - 35) { this.x = canvas.width - 35; this.speed = 0; }
+        }
+
+        this.wheelAngle += Math.abs(this.speed) * 0.15 + 0.05 * gameSpeed;
+
+        // Change color periodically
+        this.colorTimer++;
+        if (this.colorTimer > 18) {
+          this.color = CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)];
+          this.colorTimer = 0;
+        }
+      }
+
+      draw() {
+        const x = this.x, y = this.y;
+        ctx.save();
+
+        // Glow effect
+        ctx.shadowColor = this.color;
+        ctx.shadowBlur = 12;
+
+        // Car body
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.ellipse(x, y, 35, 12, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Car roof (trapezoid)
+        ctx.beginPath();
+        ctx.moveTo(x - 22, y);
+        ctx.lineTo(x - 12, y - 16);
+        ctx.lineTo(x + 12, y - 16);
+        ctx.lineTo(x + 22, y);
+        ctx.closePath();
+        ctx.fill();
+
+        // Windows
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
+        ctx.beginPath();
+        ctx.moveTo(x - 18, y - 1);
+        ctx.lineTo(x - 10, y - 13);
+        ctx.lineTo(x, y - 13);
+        ctx.lineTo(x, y - 1);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(x + 2, y - 13);
+        ctx.lineTo(x + 12, y - 13);
+        ctx.lineTo(x + 18, y - 1);
+        ctx.lineTo(x + 2, y - 1);
+        ctx.closePath();
+        ctx.fill();
+
+        // Headlights
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = '#ffffaa';
+        ctx.fillStyle = '#ffffaa';
+        ctx.beginPath();
+        ctx.ellipse(x + 33, y - 3, 4, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Taillights
+        ctx.shadowColor = '#ff2222';
+        ctx.fillStyle = '#ff2222';
+        ctx.beginPath();
+        ctx.ellipse(x - 33, y - 3, 4, 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.shadowBlur = 0;
+
+        // Wheels
+        this.drawWheel(x - 22, y + 10, this.wheelAngle);
+        this.drawWheel(x + 22, y + 10, this.wheelAngle);
+
+        ctx.restore();
+      }
+
+      drawWheel(wx, wy, angle) {
+        ctx.save();
+        ctx.translate(wx, wy);
+        ctx.fillStyle = '#111';
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(0, 0, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Tire rim spokes
+        ctx.strokeStyle = '#888';
+        ctx.lineWidth = 1.5;
+        for (let i = 0; i < 4; i++) {
+          const a = angle + (i * Math.PI) / 2;
+          ctx.beginPath();
+          ctx.moveTo(0, 0);
+          ctx.lineTo(Math.cos(a) * 6, Math.sin(a) * 6);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+
+    // ─── Game State ──────────────────────────────────────────────────────────
+    const cars = [];
+    const playerCar = new Car(canvas.width / 2, 0, 0);
+    playerCar.isPlayer = true;
+    cars.push(playerCar);
+
+    // Add initial NPC cars
+    cars.push(new Car(200, 1, 1));
+    cars.push(new Car(600, 1, 2));
+
+    const keys = {};
+    let gameSpeed = 1;
+    let score = 0;
+    let frame = 0;
+
+    document.addEventListener('keydown', e => {
+      initAudio();
+      keys[e.code] = true;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (cars.length < 8) {
+          const lane = Math.random() < 0.5 ? 0 : 1;
+          const newCar = new Car(Math.random() * canvas.width, lane, cars.length);
+          cars.push(newCar);
+        }
+      }
+
+      if (e.code === 'ArrowUp') {
+        e.preventDefault();
+        gameSpeed = Math.min(gameSpeed + 0.5, 4);
+      }
+      if (e.code === 'ArrowDown') {
+        e.preventDefault();
+        gameSpeed = Math.max(gameSpeed - 0.5, 0.5);
+      }
+      if (e.code === 'KeyM') toggleMute();
+    });
+    document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+    // ─── Background ──────────────────────────────────────────────────────────
+    function drawBackground() {
+      // Night sky gradient
+      const grad = ctx.createLinearGradient(0, 0, 0, canvas.height - 80);
+      grad.addColorStop(0, '#050510');
+      grad.addColorStop(1, '#0a0a1f');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, canvas.width, canvas.height - 80);
+
+      // Stars
+      ctx.fillStyle = '#ffffff';
+      for (let i = 0; i < 60; i++) {
+        const sx = (i * 137.5) % canvas.width;
+        const sy = (i * 73.1) % (canvas.height - 120);
+        const size = (i % 3 === 0) ? 1.5 : 0.8;
+        const twinkle = Math.sin(frame * 0.05 + i) * 0.3 + 0.7;
+        ctx.globalAlpha = twinkle * 0.6;
+        ctx.beginPath();
+        ctx.arc(sx, sy, size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      // Distant city silhouette
+      ctx.fillStyle = '#0d0d1a';
+      const buildings = [
+        [50,60,40,120],[100,40,30,140],[140,70,50,110],[200,30,35,150],
+        [245,55,40,125],[295,45,30,135],[335,65,55,115],[400,35,40,145],
+        [450,60,35,120],[495,50,45,130],[550,40,30,140],[590,70,50,110],
+        [650,30,40,150],[700,55,35,125],[745,45,45,135]
+      ];
+      for (const [bx, h, w] of buildings) {
+        ctx.fillRect(bx, canvas.height - 80 - h, w, h);
+        // Windows
+        ctx.fillStyle = '#ffe06622';
+        for (let wy = canvas.height - 80 - h + 10; wy < canvas.height - 90; wy += 15) {
+          for (let ww = bx + 5; ww < bx + w - 5; ww += 10) {
+            if (Math.random() > 0.4) ctx.fillRect(ww, wy, 5, 7);
+          }
+        }
+        ctx.fillStyle = '#0d0d1a';
+      }
+    }
+
+    // ─── HUD ─────────────────────────────────────────────────────────────────
+    function drawHUD() {
+      // Speed indicator
+      ctx.font = '700 13px Orbitron, monospace';
+      ctx.fillStyle = '#00ffcc';
+      ctx.fillText(`SPEED ${gameSpeed.toFixed(1)}x`, 10, 20);
+
+      // Player speed bar
+      const barW = 100;
+      const spd = Math.abs(playerCar.speed) / playerCar.maxSpeed;
+      ctx.fillStyle = '#ffffff11';
+      ctx.fillRect(10, 28, barW, 6);
+      ctx.fillStyle = spd > 0.7 ? '#ff4444' : '#00ffcc';
+      ctx.fillRect(10, 28, barW * spd, 6);
+
+      // Direction arrow
+      ctx.fillStyle = '#ffffff55';
+      ctx.font = '11px Share Tech Mono';
+      ctx.fillText(playerCar.speed > 0.3 ? '▶▶' : playerCar.speed < -0.3 ? '◀◀' : '■', 120, 20);
+
+      document.getElementById('score').textContent = score;
+      document.getElementById('carCount').textContent = cars.length;
+      document.getElementById('speedDisplay').textContent = gameSpeed.toFixed(1) + 'x';
+    }
+
+    // ─── Puddle Splashes ─────────────────────────────────────────────────────
+    const splashes = [];
+    function spawnSplash(x, y) {
+      splashes.push({ x, y, r: 0, maxR: 15 + Math.random() * 10, alpha: 0.6 });
+    }
+    function updateDrawSplashes() {
+      for (let i = splashes.length - 1; i >= 0; i--) {
+        const s = splashes[i];
+        s.r += 1.2;
+        s.alpha -= 0.03;
+        if (s.alpha <= 0) { splashes.splice(i, 1); continue; }
+        ctx.save();
+        ctx.strokeStyle = `rgba(173, 216, 255, ${s.alpha})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(s.x, s.y, s.r, s.r * 0.3, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // ─── Game Loop ───────────────────────────────────────────────────────────
+    function loop() {
+      frame++;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      drawBackground();
+      updateRain();
+      drawRain();
+
+      // Road offset animation
+      roadOffset = (roadOffset + 3 * gameSpeed) % 70;
+      drawRoad();
+
+      // Spawn occasional puddle splashes
+      if (Math.random() < 0.08 * gameSpeed) {
+        spawnSplash(
+          Math.random() * canvas.width,
+          canvas.height - 80 + Math.random() * 75
+        );
+      }
+      updateDrawSplashes();
+
+      // Update & draw cars (sort by lane so they overlap correctly)
+      cars.sort((a, b) => a.lane - b.lane);
+      for (let i = 0; i < cars.length; i++) {
+        cars[i].update(i === 0, keys, gameSpeed);
+        cars[i].draw();
+      }
+
+      // Score
+      score += Math.floor(gameSpeed * 0.5);
+
+      // Engine sound pitch based on speed
+      if (engineNode) {
+        engineNode.frequency.value = 60 + Math.abs(playerCar.speed) * 20 + gameSpeed * 15;
+      }
+
+      drawHUD();
+      requestAnimationFrame(loop);
+    }
+
+    loop();
+  </script>
+</body>
+</html>
